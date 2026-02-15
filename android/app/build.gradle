@@ -116,4 +116,10 @@ dependencies {
     } else {
         implementation jscFlavor
     }
+
+    // Local SMS reading module
+    implementation project(':react-native-read-sms')
 }
+
+// Apply vector icons fonts
+apply from: "../../node_modules/react-native-vector-icons/fonts.gradle"

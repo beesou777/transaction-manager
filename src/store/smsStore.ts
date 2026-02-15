@@ -83,12 +83,8 @@ export const useSMSStore = create<SMSState>((set, get) => ({
 
   loadAvailableSenders: async () => {
     if (Platform.OS !== 'android') {
-      // Show common banks for iOS/other platforms
-      const commonBanks = [
-        'NIBL', 'NABIL', 'NRB', 'SCB', 'HBL', 'KBL', 'NMB', 'PRABHU', 'LUMBINI',
-        'MEGA', 'CIVIL', 'SUNRISE', 'KUMARI', 'MACHHAPUCHCHHRE', 'JANATA'
-      ];
-      set({ availableSenders: commonBanks });
+      // iOS/other platforms - show empty list, user can add manually
+      set({ availableSenders: [], error: 'SMS reading is only available on Android' });
       return;
     }
 
@@ -96,104 +92,83 @@ export const useSMSStore = create<SMSState>((set, get) => ({
       // Check if permission is already granted
       const checkResult = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.READ_SMS);
       
-      if (checkResult) {
-        // Permission granted - read actual SMS messages
+      if (!checkResult) {
+        // Permission not granted - show empty list
+        set({ availableSenders: [], error: null });
+        return;
+      }
+
+      // Permission granted - read actual SMS messages
+      // Try to load the package dynamically if not already loaded
+      if (!ReadSms) {
         try {
-          // Try to load the package dynamically if not already loaded
-          if (!ReadSms) {
-            try {
-              const { NativeModules } = require('react-native');
-              ReadSms = NativeModules.RNExpoReadSms;
-            } catch (importError) {
-              console.error('Error importing SMS package:', importError);
+          const { NativeModules } = require('react-native');
+          ReadSms = NativeModules.RNExpoReadSms;
+        } catch (importError) {
+          console.error('Error importing SMS package:', importError);
+        }
+      }
+
+      // Check if SMS reading package is available
+      if (!ReadSms || typeof ReadSms.readSms !== 'function') {
+        console.error('SMS package not available. ReadSms:', ReadSms);
+        set({ availableSenders: [], error: 'SMS reading package not available. Please grant SMS permission.' });
+        return;
+      }
+
+      // Read SMS messages (limit to last 5000 for better coverage)
+      let smsList: any[] = [];
+      try {
+        // Use the native readSms method with Promise (React Native bridges Promise automatically)
+        smsList = await ReadSms.readSms(5000);
+      } catch (readError) {
+        set({ availableSenders: [], error: `Failed to read SMS: ${(readError as Error).message}` });
+        return;
+      }
+
+      // Extract unique senders from SMS messages
+      // Filter out phone numbers and numeric codes
+      const uniqueSenders = new Set<string>();
+      
+      if (smsList && Array.isArray(smsList) && smsList.length > 0) {
+        smsList.forEach((sms: any) => {
+          // Try different property names (address, sender, from, etc.)
+          const senderAddress = sms.address || sms.sender || sms.from || sms.phoneNumber || sms.number;
+          if (senderAddress) {
+            // Extract sender name/number
+            const sender = String(senderAddress).trim();
+            
+            // Filter out phone numbers (starting with +977 or other country codes)
+            if (/^\+?\d{10,}$/.test(sender) || sender.startsWith('+977')) {
+              return; // Skip phone numbers
+            }
+            
+            // Filter out pure numeric codes (all digits)
+            if (/^\d+$/.test(sender)) {
+              return; // Skip numeric codes
+            }
+            
+            // Only add valid senders (non-empty, reasonable length, not phone numbers)
+            if (sender && sender.length > 0 && sender.length <= 50) {
+              uniqueSenders.add(sender);
             }
           }
+        });
+      }
 
-          // Check if SMS reading package is available
-          if (!ReadSms || typeof ReadSms.readSms !== 'function') {
-            console.error('SMS package not available. ReadSms:', ReadSms);
-            // Fallback to common banks if package not available
-            const commonBanks = [
-              'NIBL', 'NABIL', 'NRB', 'SCB', 'HBL', 'KBL', 'NMB', 'PRABHU', 'LUMBINI',
-              'MEGA', 'CIVIL', 'SUNRISE', 'KUMARI', 'MACHHAPUCHCHHRE', 'JANATA'
-            ];
-            set({ availableSenders: commonBanks, error: 'SMS reading package not available' });
-            return;
-          }
-
-          // Read SMS messages (limit to last 5000 for better coverage)
-          // Wrap in try-catch to handle any native errors
-          let smsList: any[] = [];
-          try {
-            // Use the native readSms method with Promise (React Native bridges Promise automatically)
-            smsList = await ReadSms.readSms(5000);
-          } catch (readError) {
-            // Don't fallback to common banks - show error instead
-            set({ availableSenders: [], error: `Failed to read SMS: ${(readError as Error).message}` });
-            return;
-          }
-
-          // Extract unique senders from SMS messages
-          // Filter out phone numbers and numeric codes
-          const uniqueSenders = new Set<string>();
-          
-          if (smsList && Array.isArray(smsList) && smsList.length > 0) {
-            smsList.forEach((sms: any) => {
-              // Try different property names (address, sender, from, etc.)
-              const senderAddress = sms.address || sms.sender || sms.from || sms.phoneNumber || sms.number;
-              if (senderAddress) {
-                // Extract sender name/number
-                const sender = String(senderAddress).trim();
-                
-                // Filter out phone numbers (starting with +977 or other country codes)
-                if (/^\+?\d{10,}$/.test(sender) || sender.startsWith('+977')) {
-                  return; // Skip phone numbers
-                }
-                
-                // Filter out pure numeric codes (all digits)
-                if (/^\d+$/.test(sender)) {
-                  return; // Skip numeric codes
-                }
-                
-                // Only add valid senders (non-empty, reasonable length, not phone numbers)
-                if (sender && sender.length > 0 && sender.length <= 50) {
-                  uniqueSenders.add(sender);
-                }
-              }
-            });
-          }
-
-          // Convert to array and sort
-          const sendersArray = Array.from(uniqueSenders).sort();
-          
-          // Show all unique senders from actual SMS messages
-          if (sendersArray.length > 0) {
-            set({ availableSenders: sendersArray, error: null });
-          } else {
-            // If no senders found, show empty list (user can add manually)
-            set({ availableSenders: [], error: 'No SMS messages found. You can add senders manually.' });
-          }
-        } catch (smsError) {
-          console.error('Error reading SMS:', smsError);
-          // Fallback to common banks on error
-          const commonBanks = [
-            'NIBL', 'NABIL', 'NRB', 'SCB', 'HBL', 'KBL', 'NMB', 'PRABHU', 'LUMBINI',
-            'MEGA', 'CIVIL', 'SUNRISE', 'KUMARI', 'MACHHAPUCHCHHRE', 'JANATA'
-          ];
-          set({ availableSenders: commonBanks, error: 'Could not read SMS. Showing common banks.' });
-        }
+      // Convert to array and sort
+      const sendersArray = Array.from(uniqueSenders).sort();
+      
+      // Show all unique senders from actual SMS messages
+      if (sendersArray.length > 0) {
+        set({ availableSenders: sendersArray, error: null });
       } else {
-        // Permission not granted - show empty list with message
-        set({ availableSenders: [], error: null });
+        // If no senders found, show empty list (user can add manually)
+        set({ availableSenders: [], error: 'No SMS senders found in your messages. You can add senders manually.' });
       }
     } catch (error) {
-      console.error('Error checking SMS permission:', error);
-      // Show common banks as fallback
-      const commonBanks = [
-        'NIBL', 'NABIL', 'NRB', 'SCB', 'HBL', 'KBL', 'NMB', 'PRABHU', 'LUMBINI',
-        'MEGA', 'CIVIL', 'SUNRISE', 'KUMARI', 'MACHHAPUCHCHHRE', 'JANATA'
-      ];
-      set({ availableSenders: commonBanks, error: null });
+      console.error('Error loading available senders:', error);
+      set({ availableSenders: [], error: `Error loading senders: ${(error as Error).message}` });
     }
   },
 

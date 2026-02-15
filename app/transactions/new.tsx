@@ -15,22 +15,12 @@ import { TransactionType } from '@/types';
 import { Picker } from '@react-native-picker/picker';
 import { useColorScheme } from 'react-native';
 import { cleanBankName } from '@/utils/smsParser';
+import { BUSINESS_CATEGORIES, INCOME_CATEGORIES } from '@/constants/categories';
 
 const TRANSACTION_TYPES: { label: string; value: TransactionType }[] = [
   { label: 'Income', value: 'income' },
   { label: 'Expense', value: 'expense' },
   { label: 'Transfer', value: 'transfer' },
-];
-
-const CATEGORIES = [
-  'Salary',
-  'Sales',
-  'Rent',
-  'Utilities',
-  'Supplies',
-  'Marketing',
-  'Transport',
-  'Other',
 ];
 
 type NewTransactionRouteProp = RouteProp<{ params: { businessId?: string } }, 'params'>;
@@ -59,7 +49,7 @@ export default function NewTransactionScreen() {
 
   const [type, setType] = useState<TransactionType>('expense');
   const [amount, setAmount] = useState('');
-  const [category, setCategory] = useState(CATEGORIES[0]);
+  const [category, setCategory] = useState(BUSINESS_CATEGORIES[0]);
   const [description, setDescription] = useState('');
   const [referenceNumber, setReferenceNumber] = useState('');
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
@@ -89,6 +79,8 @@ export default function NewTransactionScreen() {
         date: formatDateForDB(new Date(date)),
         hasVAT: false,
         bankName: selectedBank !== 'none' ? cleanBankName(selectedBank) : undefined,
+        status: 'cleared', // Default to cleared
+        reconciled: false, // Default to unreconciled
       });
       navigation.goBack();
     } catch (err) {
@@ -128,7 +120,7 @@ export default function NewTransactionScreen() {
           error={error}
         />
 
-        {type === 'expense' && (
+        {(type === 'expense' || type === 'income') && (
           <>
             <Text style={[styles.label, { color: colors.text }]}>Category *</Text>
             <View style={styles.pickerContainer}>
@@ -137,7 +129,7 @@ export default function NewTransactionScreen() {
                 onValueChange={setCategory}
                 style={[styles.picker, { color: colors.text }]}
               >
-                {CATEGORIES.map((cat) => (
+                {(type === 'expense' ? BUSINESS_CATEGORIES : INCOME_CATEGORIES).map((cat) => (
                   <Picker.Item key={cat} label={cat} value={cat} />
                 ))}
               </Picker>

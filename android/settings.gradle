@@ -3,4 +3,6 @@ plugins { id("com.facebook.react.settings") }
 extensions.configure(com.facebook.react.ReactSettingsExtension){ ex -> ex.autolinkLibrariesFromCommand() }
 rootProject.name = 'NepaliFinanceManagerNew'
 include ':app'
+include ':react-native-read-sms'
+project(':react-native-read-sms').projectDir = new File(rootProject.projectDir, './react-native-read-sms')
 includeBuild('../node_modules/@react-native/gradle-plugin')

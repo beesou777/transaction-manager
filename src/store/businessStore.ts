@@ -36,6 +36,12 @@ export const useBusinessStore = create<BusinessState>((set, get) => ({
   createBusiness: async (business) => {
     set({ isLoading: true, error: null });
     try {
+      // Enforce single business - check if one already exists
+      const existingBusinesses = await storageService.getBusinesses();
+      if (existingBusinesses.length > 0) {
+        throw new Error('Only one business is allowed. Please update the existing business instead.');
+      }
+
       const id = `business_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       const now = new Date().toISOString();
       const newBusiness: Business = {

@@ -3,6 +3,8 @@ export interface Business {
   id: string;
   name: string;
   description?: string;
+  openingBalance?: number; // Opening balance for the business
+  openingBalanceDate?: string; // Date when opening balance was set
   createdAt: string;
   updatedAt: string;
 }
@@ -33,6 +35,8 @@ export interface Transaction {
   date: string;
   hasVAT: boolean;
   vatAmount?: number;
+  reconciled?: boolean; // For bank statement reconciliation
+  status?: 'cleared' | 'pending'; // Transaction status
   createdAt: string;
   updatedAt: string;
 }

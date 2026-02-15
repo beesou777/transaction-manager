@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, FlatList, TouchableOpacity, Switch, Alert, Platform } from 'react-native';
+import React, { useEffect, useState, useMemo } from 'react';
+import { View, Text, StyleSheet, ScrollView, FlatList, TouchableOpacity, Switch, Alert, Platform, TextInput } from 'react-native';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { useSMSStore, SMSSender } from '@/store/smsStore';
 import { Card } from '@/components/Card';
@@ -22,6 +22,7 @@ export default function SMSSendersScreen() {
 
   const [showAvailable, setShowAvailable] = useState(false);
   const [permissionGranted, setPermissionGranted] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
 
   useEffect(() => {
     if (id) {
@@ -123,6 +124,17 @@ export default function SMSSendersScreen() {
     </Card>
   );
 
+  // Filter available senders based on search query
+  const filteredAvailableSenders = useMemo(() => {
+    if (!searchQuery.trim()) {
+      return availableSenders;
+    }
+    const query = searchQuery.toLowerCase().trim();
+    return availableSenders.filter(sender => 
+      sender.toLowerCase().includes(query)
+    );
+  }, [availableSenders, searchQuery]);
+
   const renderAvailableSender = (senderName: string) => (
     <TouchableOpacity
       key={senderName}
@@ -220,9 +232,28 @@ export default function SMSSendersScreen() {
               ) : (
                 <>
                   <Text style={[styles.availableLabel, { color: colors.textSecondary }]}>
-                    SMS Senders from your messages ({availableSenders.length}):
+                    SMS Senders from your messages ({filteredAvailableSenders.length}):
                   </Text>
-                  {availableSenders.map((sender) => renderAvailableSender(sender))}
+                  <TextInput
+                    style={[styles.searchInput, { 
+                      backgroundColor: colors.surface, 
+                      color: colors.text,
+                      borderColor: colors.border 
+                    }]}
+                    placeholder="Search senders..."
+                    placeholderTextColor={colors.textSecondary}
+                    value={searchQuery}
+                    onChangeText={setSearchQuery}
+                  />
+                  {filteredAvailableSenders.length === 0 ? (
+                    <Card>
+                      <Text style={[styles.emptyText, { color: colors.textSecondary }]}>
+                        No senders found matching "{searchQuery}"
+                      </Text>
+                    </Card>
+                  ) : (
+                    filteredAvailableSenders.map((sender) => renderAvailableSender(sender))
+                  )}
                 </>
               )}
             </View>
@@ -369,6 +400,13 @@ const styles = StyleSheet.create({
     ...Typography.bodySmall,
     marginBottom: Spacing.sm,
     fontWeight: '600',
+  },
+  searchInput: {
+    padding: Spacing.md,
+    borderRadius: 8,
+    borderWidth: 1,
+    marginBottom: Spacing.md,
+    ...Typography.body,
   },
   fabContainer: {
     padding: Spacing.md,

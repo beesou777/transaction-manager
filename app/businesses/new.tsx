@@ -24,8 +24,9 @@ export default function NewBusinessScreen() {
     }
 
     try {
-      await createBusiness({ name: name.trim(), description: description.trim() || undefined });
-      navigation.goBack();
+      const newBusiness = await createBusiness({ name: name.trim(), description: description.trim() || undefined });
+      // Navigate to home page after creating business
+      navigation.navigate('MainTabs' as never);
     } catch (err) {
       Alert.alert('Error', (err as Error).message);
     }

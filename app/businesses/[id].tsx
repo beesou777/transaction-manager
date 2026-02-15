@@ -18,6 +18,7 @@ import { useColorScheme } from 'react-native';
 import * as FileSystem from 'react-native-fs';
 import Share from 'react-native-share';
 import { cleanBankName } from '@/utils/smsParser';
+import { findDuplicates, isDuplicateTransaction } from '@/utils/duplicateDetection';
 
 type BusinessDetailRouteProp = RouteProp<{ params: { id: string } }, 'params'>;
 
@@ -33,6 +34,7 @@ type CombinedTransaction = {
   accountNumber?: string;
   category?: string;
   isManual: boolean;
+  isDuplicate?: boolean; // True if this is a duplicate of another transaction
 };
 
 export default function BusinessDetailScreen() {
@@ -138,34 +140,28 @@ export default function BusinessDetailScreen() {
     return false;
   });
 
-  // Combine parsed transactions and manual transactions
-  // Use Set to deduplicate by creating unique keys
+  // Get manual transactions for this business
+  const manualTransactions = transactions.filter((t) => t.businessId === id);
+  
+  // Find duplicates between manual and parsed transactions
+  const duplicateMap = findDuplicates(manualTransactions, businessParsedTransactions);
+  
+  // Combine parsed transactions and manual transactions with duplicate detection
   const transactionMap = new Map<string, CombinedTransaction>();
+  const usedParsedIndices = new Set<number>();
   
-  // Add parsed transactions with unique IDs (only from this business)
-  businessParsedTransactions.forEach((tx, index) => {
-    // Create unique ID using hash of message + date + index
-    const uniqueKey = `parsed_${tx.bankName}_${tx.date}_${tx.amount}_${index}_${tx.rawMessage.substring(0, 50).replace(/[^a-zA-Z0-9]/g, '')}`;
-    if (!transactionMap.has(uniqueKey)) {
-      transactionMap.set(uniqueKey, {
-        id: uniqueKey,
-        type: tx.type,
-        amount: tx.amount,
-        date: tx.date,
-        description: tx.description,
-        bankName: tx.bankName,
-        remarks: tx.remarks,
-        referenceNumber: tx.referenceNumber,
-        accountNumber: tx.accountNumber,
-        isManual: false,
-      });
-    }
-  });
-  
-  // Add manual transactions
-  transactions
-    .filter((t) => t.businessId === id)
-    .forEach((tx) => {
+  // First, add manual transactions
+  manualTransactions.forEach((tx) => {
+    // Check if this manual transaction has a duplicate in parsed transactions
+    const duplicateParsed = businessParsedTransactions.findIndex(
+      (parsedTx, index) => 
+        !usedParsedIndices.has(index) && 
+        isDuplicateTransaction(tx, parsedTx)
+    );
+    
+    if (duplicateParsed !== -1) {
+      // Found duplicate - mark parsed transaction as used and add manual one with duplicate flag
+      usedParsedIndices.add(duplicateParsed);
       transactionMap.set(tx.id, {
         id: tx.id,
         type: tx.type,
@@ -175,8 +171,45 @@ export default function BusinessDetailScreen() {
         category: tx.category,
         bankName: tx.bankName,
         isManual: true,
+        isDuplicate: true, // Mark as duplicate
       });
-    });
+    } else {
+      // No duplicate - add normally
+      transactionMap.set(tx.id, {
+        id: tx.id,
+        type: tx.type,
+        amount: tx.amount,
+        date: tx.date,
+        description: tx.description || tx.category,
+        category: tx.category,
+        bankName: tx.bankName,
+        isManual: true,
+        isDuplicate: false,
+      });
+    }
+  });
+  
+  // Add remaining parsed transactions (those not marked as duplicates)
+  businessParsedTransactions.forEach((tx, index) => {
+    if (!usedParsedIndices.has(index)) {
+      const uniqueKey = `parsed_${tx.bankName}_${tx.date}_${tx.amount}_${index}_${tx.rawMessage.substring(0, 50).replace(/[^a-zA-Z0-9]/g, '')}`;
+      if (!transactionMap.has(uniqueKey)) {
+        transactionMap.set(uniqueKey, {
+          id: uniqueKey,
+          type: tx.type,
+          amount: tx.amount,
+          date: tx.date,
+          description: tx.description,
+          bankName: tx.bankName,
+          remarks: tx.remarks,
+          referenceNumber: tx.referenceNumber,
+          accountNumber: tx.accountNumber,
+          isManual: false,
+          isDuplicate: false,
+        });
+      }
+    }
+  });
   
   const allTransactions = Array.from(transactionMap.values());
 
@@ -196,31 +229,98 @@ export default function BusinessDetailScreen() {
   }
 
   // Filter by date range - only filter if dates are set
-  // Also filter out transactions with invalid dates (today's date when it shouldn't be)
   const filteredTransactions = bankFilteredTransactions.filter((tx) => {
-    // Skip transactions with invalid dates (parsing failed - shows today's date)
-    const txDate = new Date(tx.date);
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const txDateOnly = new Date(txDate);
-    txDateOnly.setHours(0, 0, 0, 0);
-    
-    // If date is today and it's a parsed transaction, it might be invalid
-    // Only skip if it's clearly a parsing error (date is exactly today at midnight)
-    // For now, show all transactions and let date range filter handle it
-    
-    // Apply date range filter if dates are set
-    if (startDate || endDate) {
-      const txDateStr = txDate.toISOString().split('T')[0];
-      if (startDate && txDateStr < startDate) return false;
-      if (endDate && txDateStr > endDate) return false;
-    }
-    
+    const txDateStr = new Date(tx.date).toISOString().split('T')[0];
+    if (startDate && txDateStr < startDate) return false;
+    if (endDate && txDateStr > endDate) return false;
     return true;
   });
 
   // Sort by date (newest first)
   filteredTransactions.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+  // Group transactions by month and day
+  type GroupedTransactions = {
+    month: string;
+    monthYear: string;
+    monthIncome: number;
+    monthExpense: number;
+    days: {
+      date: string;
+      day: number;
+      dayName: string;
+      monthYear: string;
+      income: number;
+      expense: number;
+      transactions: CombinedTransaction[];
+    }[];
+  };
+
+  const groupedTransactions = useMemo(() => {
+    const monthMap = new Map<string, GroupedTransactions>();
+    
+    filteredTransactions.forEach((tx) => {
+      const date = new Date(tx.date);
+      const monthKey = date.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+      const dayKey = date.toISOString().split('T')[0];
+      const day = date.getDate();
+      const dayName = date.toLocaleDateString('en-US', { weekday: 'short' });
+      
+      if (!monthMap.has(monthKey)) {
+        monthMap.set(monthKey, {
+          month: date.toLocaleDateString('en-US', { month: 'long' }),
+          monthYear: monthKey,
+          monthIncome: 0,
+          monthExpense: 0,
+          days: [],
+        });
+      }
+      
+      const monthData = monthMap.get(monthKey)!;
+      
+      // Update month totals
+      if (tx.type === 'income') {
+        monthData.monthIncome += tx.amount;
+      } else {
+        monthData.monthExpense += tx.amount;
+      }
+      
+      // Find or create day entry
+      let dayData = monthData.days.find(d => d.date === dayKey);
+      if (!dayData) {
+        dayData = {
+          date: dayKey,
+          day,
+          dayName,
+          monthYear: monthKey,
+          income: 0,
+          expense: 0,
+          transactions: [],
+        };
+        monthData.days.push(dayData);
+      }
+      
+      // Update day totals and add transaction
+      if (tx.type === 'income') {
+        dayData.income += tx.amount;
+      } else {
+        dayData.expense += tx.amount;
+      }
+      dayData.transactions.push(tx);
+    });
+    
+    // Sort days within each month (newest first)
+    monthMap.forEach((monthData) => {
+      monthData.days.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    });
+    
+    // Convert to array and sort months (newest first)
+    return Array.from(monthMap.values()).sort((a, b) => {
+      const dateA = new Date(a.monthYear);
+      const dateB = new Date(b.monthYear);
+      return dateB.getTime() - dateA.getTime();
+    });
+  }, [filteredTransactions]);
 
   // Calculate totals
   const totalIncome = filteredTransactions
@@ -293,60 +393,49 @@ export default function BusinessDetailScreen() {
     }
   };
 
-  const renderTransaction = ({ item }: { item: CombinedTransaction }) => (
-    <Card style={styles.transactionCard}>
-      <View style={styles.transactionHeader}>
-        <View style={styles.transactionTypeContainer}>
-          <View
-            style={[
-              styles.typeBadge,
-              {
-                backgroundColor: item.type === 'income' ? colors.income + '20' : colors.expense + '20',
-              },
-            ]}
-          >
-            <Text
-              style={[
-                styles.typeText,
-                {
-                  color: item.type === 'income' ? colors.income : colors.expense,
-                },
-              ]}
-            >
-              {item.type === 'income' ? 'Credit' : 'Debit'}
+  const formatTime = (dateString: string) => {
+    const date = new Date(dateString);
+    return date.toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+    });
+  };
+
+  const renderTransaction = (item: CombinedTransaction) => (
+    <Card style={[
+      styles.transactionCard, 
+      item.isDuplicate && { borderLeftWidth: 4, borderLeftColor: colors.warning }
+    ].filter(Boolean) as any}>
+      <View style={styles.transactionItemContent}>
+        <View style={styles.transactionItemLeft}>
+          <Text style={[styles.transactionDescription, { color: colors.text }]}>
+            {item.description}
+          </Text>
+          {item.bankName && (
+            <Text style={[styles.transactionBank, { color: colors.textSecondary }]}>
+              {item.bankName}
             </Text>
-          </View>
-          <CurrencyDisplay
-            amount={item.amount}
-            size="medium"
-            color={item.type === 'income' ? colors.income : colors.expense}
-          />
+          )}
+          {item.remarks && (
+            <Text style={[styles.transactionRemarks, { color: colors.textSecondary }]}>
+              {item.remarks}
+            </Text>
+          )}
+          {item.isDuplicate && (
+            <View style={[styles.duplicateBadge, { backgroundColor: colors.warning + '20' }]}>
+              <Text style={[styles.duplicateText, { color: colors.warning }]}>⚠️ Duplicate</Text>
+            </View>
+          )}
         </View>
-        <Text style={[styles.transactionDate, { color: colors.textSecondary }]}>
-          {formatDateTime(item.date)}
-        </Text>
-      </View>
-      <View style={styles.transactionDetails}>
-        {item.bankName && (
-          <Text style={[styles.bankName, { color: colors.text }]}>{item.bankName}</Text>
-        )}
-        {item.category && (
-          <Text style={[styles.category, { color: colors.textSecondary }]}>Category: {item.category}</Text>
-        )}
-        <Text style={[styles.description, { color: colors.text }]}>{item.description}</Text>
-        {item.remarks && (
-          <Text style={[styles.remarks, { color: colors.textSecondary }]}>Remarks: {item.remarks}</Text>
-        )}
-        {item.referenceNumber && (
-          <Text style={[styles.reference, { color: colors.textSecondary }]}>
-            Ref: {item.referenceNumber}
+        <View style={styles.transactionItemRight}>
+          <Text style={[styles.transactionTime, { color: colors.textSecondary }]}>
+            {formatTime(item.date)}
           </Text>
-        )}
-        {item.accountNumber && (
-          <Text style={[styles.account, { color: colors.textSecondary }]}>
-            Account: {item.accountNumber}
+          <Text style={[styles.transactionAmount, { color: item.type === 'income' ? colors.success : colors.error }]}>
+            NPR {item.amount.toFixed(2)}
           </Text>
-        )}
+        </View>
       </View>
     </Card>
   );
@@ -459,12 +548,62 @@ export default function BusinessDetailScreen() {
                 {startDate && endDate && ` (${formatDate(startDate)} - ${formatDate(endDate)})`}
                 {selectedBank !== 'all' && ` • ${cleanBankName(selectedBank)}`}
               </Text>
-              <FlatList
-                data={filteredTransactions}
-                renderItem={renderTransaction}
-                keyExtractor={(item) => item.id}
-                scrollEnabled={false}
-              />
+              
+              {groupedTransactions.map((monthData) => (
+                <View key={monthData.monthYear} style={styles.monthSection}>
+                  {/* Month Header */}
+                  <View style={[styles.monthHeader, { backgroundColor: colors.surface }]}>
+                    <Text style={[styles.monthTitle, { color: colors.text }]}>
+                      {monthData.month}
+                    </Text>
+                    <View style={styles.monthTotals}>
+                      <Text style={[styles.monthTotalLabel, { color: colors.textSecondary }]}>
+                        Income: <Text style={{ color: colors.success }}>NPR {monthData.monthIncome.toFixed(2)}</Text>
+                      </Text>
+                      <Text style={[styles.monthTotalLabel, { color: colors.textSecondary }]}>
+                        Expense: <Text style={{ color: colors.error }}>NPR {monthData.monthExpense.toFixed(2)}</Text>
+                      </Text>
+                    </View>
+                  </View>
+                  
+                  {/* Days */}
+                  {monthData.days.map((dayData) => (
+                    <View key={dayData.date} style={styles.daySection}>
+                      {/* Day Header */}
+                      <View style={[styles.dayHeader, { backgroundColor: colors.background }]}>
+                        <View style={styles.dayHeaderLeft}>
+                          <Text style={[styles.dayNumber, { color: colors.text }]}>
+                            {dayData.day}
+                          </Text>
+                          <View style={styles.dayInfo}>
+                            <Text style={[styles.dayName, { color: colors.text }]}>
+                              {dayData.dayName}
+                            </Text>
+                            <Text style={[styles.dayMonthYear, { color: colors.textSecondary }]}>
+                              {dayData.monthYear}
+                            </Text>
+                          </View>
+                        </View>
+                        <View style={styles.dayTotals}>
+                          <Text style={[styles.dayTotalLabel, { color: colors.textSecondary }]}>
+                            Income: <Text style={{ color: colors.success }}>NPR {dayData.income.toFixed(2)}</Text>
+                          </Text>
+                          <Text style={[styles.dayTotalLabel, { color: colors.textSecondary }]}>
+                            Expense: <Text style={{ color: colors.error }}>NPR {dayData.expense.toFixed(2)}</Text>
+                          </Text>
+                        </View>
+                      </View>
+                      
+                      {/* Transactions for this day */}
+                      {dayData.transactions.map((tx) => (
+                        <View key={tx.id} style={styles.transactionItemWrapper}>
+                          {renderTransaction(tx)}
+                        </View>
+                      ))}
+                    </View>
+                  ))}
+                </View>
+              ))}
             </View>
           ) : (
             <Card>
@@ -483,7 +622,7 @@ export default function BusinessDetailScreen() {
           title="📱 Manage Banks"
           onPress={() => {
             // @ts-ignore - navigation type issue
-            navigation.navigate('SMSSenders', { id });
+            navigation.navigate('BusinessSmsSenders', { id });
           }}
           fullWidth
           style={styles.smsButton}
@@ -571,6 +710,21 @@ const styles = StyleSheet.create({
   dateFilterCard: {
     marginBottom: Spacing.md,
   },
+  transactionSource: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: Spacing.xs,
+  },
+  sourceBadge: {
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: Spacing.xs,
+    borderRadius: 4,
+  },
+  sourceText: {
+    ...Typography.caption,
+    fontWeight: '600',
+  },
   transactionsContainer: {
     marginTop: Spacing.md,
   },
@@ -600,6 +754,17 @@ const styles = StyleSheet.create({
   },
   typeText: {
     ...Typography.caption,
+    fontWeight: '600',
+  },
+  duplicateBadge: {
+    paddingHorizontal: Spacing.xs,
+    paddingVertical: 2,
+    borderRadius: 4,
+    marginLeft: Spacing.xs,
+  },
+  duplicateText: {
+    ...Typography.caption,
+    fontSize: 10,
     fontWeight: '600',
   },
   transactionDate: {
@@ -672,5 +837,105 @@ const styles = StyleSheet.create({
   },
   refreshButton: {
     padding: Spacing.xs,
+  },
+  monthSection: {
+    marginBottom: Spacing.lg,
+  },
+  monthHeader: {
+    padding: Spacing.md,
+    borderRadius: 8,
+    marginBottom: Spacing.md,
+  },
+  monthTitle: {
+    ...Typography.h3,
+    marginBottom: Spacing.sm,
+    fontWeight: '600',
+  },
+  monthTotals: {
+    flexDirection: 'row',
+    gap: Spacing.md,
+  },
+  monthTotalLabel: {
+    ...Typography.bodySmall,
+  },
+  daySection: {
+    marginBottom: Spacing.md,
+  },
+  dayHeader: {
+    padding: Spacing.md,
+    borderRadius: 8,
+    marginBottom: Spacing.sm,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  dayHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
+  },
+  dayNumber: {
+    ...Typography.h2,
+    fontWeight: '700',
+    minWidth: 40,
+  },
+  dayInfo: {
+    justifyContent: 'center',
+  },
+  dayName: {
+    ...Typography.body,
+    fontWeight: '600',
+  },
+  dayMonthYear: {
+    ...Typography.caption,
+    marginTop: 2,
+  },
+  dayTotals: {
+    alignItems: 'flex-end',
+  },
+  dayTotalLabel: {
+    ...Typography.caption,
+    marginTop: Spacing.xs,
+  },
+  transactionItemWrapper: {
+    marginBottom: Spacing.sm,
+  },
+  transactionItemContent: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+  },
+  transactionItemLeft: {
+    flex: 1,
+    marginRight: Spacing.md,
+  },
+  transactionItemRight: {
+    alignItems: 'flex-end',
+  },
+  transactionDescription: {
+    ...Typography.body,
+    fontWeight: '500',
+    marginBottom: Spacing.xs,
+  },
+  transactionBank: {
+    ...Typography.caption,
+    marginTop: Spacing.xs,
+  },
+  transactionRemarks: {
+    ...Typography.caption,
+    marginTop: Spacing.xs,
+    fontStyle: 'italic',
+  },
+  transactionTime: {
+    ...Typography.caption,
+    marginBottom: Spacing.xs,
+  },
+  transactionAmount: {
+    ...Typography.body,
+    fontWeight: '600',
+  },
+  duplicateIndicator: {
+    ...Typography.caption,
+    marginTop: Spacing.xs,
   },
 });
