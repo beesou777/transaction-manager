@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, FlatList, ActivityIndicator, Alert, Platform } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, FlatList, ActivityIndicator, Alert, Platform, InteractionManager, BackHandler } from 'react-native';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { Picker } from '@react-native-picker/picker';
 import { useBusinessStore } from '@/store/businessStore';
@@ -63,22 +63,75 @@ export default function BusinessDetailScreen() {
     [enabledBanks]
   );
 
+  const [isInitialLoad, setIsInitialLoad] = useState(true);
+  const [isLoadingData, setIsLoadingData] = useState(true);
+
+  // Handle back button - navigate back instead of closing app
+  useEffect(() => {
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (navigation.canGoBack()) {
+        navigation.goBack();
+        return true; // Prevent default behavior
+      }
+      return false; // Allow default behavior (close app) if can't go back
+    });
+
+    return () => backHandler.remove();
+  }, [navigation]);
+
+  // Load data immediately but asynchronously - don't block navigation
   useEffect(() => {
     if (id) {
-      loadTransactions(id);
-      loadSenders(id);
-      const biz = businesses.find((b) => b.id === id);
-      if (biz) selectBusiness(biz);
+      // Set loading state immediately
+      setIsLoadingData(true);
+      
+      // Load data asynchronously using requestIdleCallback or setTimeout for immediate execution
+      const loadData = async () => {
+        try {
+          // Load transactions and senders in parallel - these are now fast with minimal data
+          await Promise.all([
+            loadTransactions(id),
+            loadSenders(id),
+          ]);
+          
+          const biz = businesses.find((b) => b.id === id);
+          if (biz) selectBusiness(biz);
+          
+          setIsLoadingData(false);
+        } catch (error) {
+          console.error('Error loading data:', error);
+          setIsLoadingData(false);
+        }
+      };
+      
+      // Use requestAnimationFrame for immediate execution after render
+      // This ensures navigation happens instantly
+      requestAnimationFrame(() => {
+        // Use setTimeout(0) to defer to next event loop tick
+        setTimeout(() => {
+          loadData();
+        }, 0);
+      });
+    } else {
+      setIsLoadingData(false);
     }
-  }, [id, businesses]);
+  }, [id, businesses, loadTransactions, loadSenders, selectBusiness]);
 
-  // Load all messages when senders are loaded - use stable key to prevent loops
+  // Load all messages when senders are loaded - after initial data is loaded
   useEffect(() => {
-    if (enabledBanks.length > 0 && id) {
-      loadAllMessages(enabledBanks);
+    if (enabledBanks.length > 0 && id && !isLoadingData) {
+      // Load messages after a short delay to not block UI
+      const timer = setTimeout(() => {
+        loadAllMessages(enabledBanks);
+        setIsInitialLoad(false);
+      }, 200);
+      
+      return () => clearTimeout(timer);
+    } else if (!isLoadingData) {
+      setIsInitialLoad(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabledBanksKey, id]);
+  }, [enabledBanksKey, id, isLoadingData]);
 
   // Don't set default date range - show all transactions by default
   // User can set date range if needed
@@ -92,109 +145,89 @@ export default function BusinessDetailScreen() {
     }
   };
 
-  // First, filter parsed transactions to only include those from this business's banks
-  // Create a set of cleaned bank names for this business (with variations)
-  const businessBanksSet = new Set<string>();
-  senders
-    .filter(s => s.businessId === id && s.enabled)
-    .forEach(s => {
-      const cleaned = cleanBankName(s.senderName).toLowerCase();
-      businessBanksSet.add(cleaned);
-      // Also add variations for better matching
-      const words = cleaned.split(' ');
-      if (words.length > 1) {
-        businessBanksSet.add(words[0]); // Add first word (e.g., "laxmi" from "laxmi bank")
-        // For "Laxmi Bank", also add "laxmi" for matching
-        if (words[0] === 'laxmi' || words[0] === 'sunrise') {
-          businessBanksSet.add('laxmi bank'); // Normalize to "laxmi bank"
+  // Memoize business banks set to avoid recalculating
+  const businessBanksSet = useMemo(() => {
+    const bankSet = new Set<string>();
+    senders
+      .filter(s => s.businessId === id && s.enabled)
+      .forEach(s => {
+        const cleaned = cleanBankName(s.senderName).toLowerCase();
+        bankSet.add(cleaned);
+        // Also add variations for better matching
+        const words = cleaned.split(' ');
+        if (words.length > 1) {
+          bankSet.add(words[0]); // Add first word (e.g., "laxmi" from "laxmi bank")
+          // For "Laxmi Bank", also add "laxmi" for matching
+          if (words[0] === 'laxmi' || words[0] === 'sunrise') {
+            bankSet.add('laxmi bank'); // Normalize to "laxmi bank"
+          }
+        }
+      });
+    return bankSet;
+  }, [senders, id]);
+
+  // Memoize filtered parsed transactions
+  const businessParsedTransactions = useMemo(() => {
+    if (businessBanksSet.size === 0) return [];
+    
+    return allParsedTransactions.filter(tx => {
+      const txBankNameLower = tx.bankName.toLowerCase();
+      
+      // Check exact match first
+      if (businessBanksSet.has(txBankNameLower)) return true;
+      
+      // Normalize transaction bank name for matching
+      let normalizedTxBank = txBankNameLower;
+      if (normalizedTxBank.includes('laxmi') || normalizedTxBank.includes('sunrise')) {
+        normalizedTxBank = 'laxmi bank';
+      }
+      if (businessBanksSet.has(normalizedTxBank)) return true;
+      
+      // Check if transaction bank name contains any of the business bank names
+      for (const bankName of businessBanksSet) {
+        if (txBankNameLower.includes(bankName) || bankName.includes(txBankNameLower)) {
+          return true;
+        }
+        if (normalizedTxBank.includes(bankName) || bankName.includes(normalizedTxBank)) {
+          return true;
         }
       }
+      return false;
     });
+  }, [allParsedTransactions, businessBanksSet]);
 
-  // Filter parsed transactions to only include those from this business's banks
-  const businessParsedTransactions = allParsedTransactions.filter(tx => {
-    if (businessBanksSet.size === 0) return false;
-    const txBankNameLower = tx.bankName.toLowerCase();
-    
-    // Check exact match first
-    if (businessBanksSet.has(txBankNameLower)) return true;
-    
-    // Normalize transaction bank name for matching
-    // "Laxmi Sunrise" or "Laxmi Bank" should match "laxmi bank"
-    let normalizedTxBank = txBankNameLower;
-    if (normalizedTxBank.includes('laxmi') || normalizedTxBank.includes('sunrise')) {
-      normalizedTxBank = 'laxmi bank';
-    }
-    if (businessBanksSet.has(normalizedTxBank)) return true;
-    
-    // Check if transaction bank name contains any of the business bank names
-    for (const bankName of businessBanksSet) {
-      if (txBankNameLower.includes(bankName) || bankName.includes(txBankNameLower)) {
-        return true;
-      }
-      // Also check normalized versions
-      if (normalizedTxBank.includes(bankName) || bankName.includes(normalizedTxBank)) {
-        return true;
-      }
-    }
-    return false;
-  });
-
-  // Get manual transactions for this business
-  const manualTransactions = transactions.filter((t) => t.businessId === id);
+  // Memoize manual transactions
+  const manualTransactions = useMemo(() => 
+    transactions.filter((t) => t.businessId === id),
+    [transactions, id]
+  );
   
-  // Find duplicates between manual and parsed transactions
-  const duplicateMap = findDuplicates(manualTransactions, businessParsedTransactions);
-  
-  // Combine parsed transactions and manual transactions with duplicate detection
-  const transactionMap = new Map<string, CombinedTransaction>();
-  const usedParsedIndices = new Set<number>();
-  
-  // First, add manual transactions
-  manualTransactions.forEach((tx) => {
-    // Check if this manual transaction has a duplicate in parsed transactions
-    const duplicateParsed = businessParsedTransactions.findIndex(
-      (parsedTx, index) => 
-        !usedParsedIndices.has(index) && 
-        isDuplicateTransaction(tx, parsedTx)
-    );
-    
-    if (duplicateParsed !== -1) {
-      // Found duplicate - mark parsed transaction as used and add manual one with duplicate flag
-      usedParsedIndices.add(duplicateParsed);
-      transactionMap.set(tx.id, {
-        id: tx.id,
-        type: tx.type,
-        amount: tx.amount,
-        date: tx.date,
-        description: tx.description || tx.category,
-        category: tx.category,
-        bankName: tx.bankName,
-        isManual: true,
-        isDuplicate: true, // Mark as duplicate
+  // Memoize combined transactions with duplicate detection
+  const allTransactions = useMemo(() => {
+    // For large datasets, skip duplicate detection on initial load to speed up navigation
+    if (isInitialLoad && (manualTransactions.length > 50 || businessParsedTransactions.length > 50)) {
+      // Fast path: just combine without duplicate detection
+      const combined: CombinedTransaction[] = [];
+      
+      // Add manual transactions
+      manualTransactions.forEach((tx) => {
+        combined.push({
+          id: tx.id,
+          type: tx.type,
+          amount: tx.amount,
+          date: tx.date,
+          description: tx.description || tx.category,
+          category: tx.category,
+          bankName: tx.bankName,
+          isManual: true,
+          isDuplicate: false,
+        });
       });
-    } else {
-      // No duplicate - add normally
-      transactionMap.set(tx.id, {
-        id: tx.id,
-        type: tx.type,
-        amount: tx.amount,
-        date: tx.date,
-        description: tx.description || tx.category,
-        category: tx.category,
-        bankName: tx.bankName,
-        isManual: true,
-        isDuplicate: false,
-      });
-    }
-  });
-  
-  // Add remaining parsed transactions (those not marked as duplicates)
-  businessParsedTransactions.forEach((tx, index) => {
-    if (!usedParsedIndices.has(index)) {
-      const uniqueKey = `parsed_${tx.bankName}_${tx.date}_${tx.amount}_${index}_${tx.rawMessage.substring(0, 50).replace(/[^a-zA-Z0-9]/g, '')}`;
-      if (!transactionMap.has(uniqueKey)) {
-        transactionMap.set(uniqueKey, {
+      
+      // Add parsed transactions
+      businessParsedTransactions.forEach((tx, index) => {
+        const uniqueKey = `parsed_${tx.bankName}_${tx.date}_${tx.amount}_${index}`;
+        combined.push({
           id: uniqueKey,
           type: tx.type,
           amount: tx.amount,
@@ -207,37 +240,105 @@ export default function BusinessDetailScreen() {
           isManual: false,
           isDuplicate: false,
         });
-      }
+      });
+      
+      return combined;
     }
-  });
-  
-  const allTransactions = Array.from(transactionMap.values());
-
-  // Filter by bank if selected
-  let bankFilteredTransactions = allTransactions;
-  if (selectedBank !== 'all') {
-    const selectedBankCleaned = cleanBankName(selectedBank).toLowerCase();
-    bankFilteredTransactions = allTransactions.filter((tx) => {
-      if (tx.isManual) {
-        // For manual transactions, show if they match the selected bank or have no bank
-        if (!tx.bankName) return true;
-        return cleanBankName(tx.bankName).toLowerCase() === selectedBankCleaned;
+    
+    // Full duplicate detection for smaller datasets or after initial load
+    const transactionMap = new Map<string, CombinedTransaction>();
+    const usedParsedIndices = new Set<number>();
+    
+    // First, add manual transactions
+    manualTransactions.forEach((tx) => {
+      const duplicateParsed = businessParsedTransactions.findIndex(
+        (parsedTx, index) => 
+          !usedParsedIndices.has(index) && 
+          isDuplicateTransaction(tx, parsedTx)
+      );
+      
+      if (duplicateParsed !== -1) {
+        usedParsedIndices.add(duplicateParsed);
+        transactionMap.set(tx.id, {
+          id: tx.id,
+          type: tx.type,
+          amount: tx.amount,
+          date: tx.date,
+          description: tx.description || tx.category,
+          category: tx.category,
+          bankName: tx.bankName,
+          isManual: true,
+          isDuplicate: true,
+        });
+      } else {
+        transactionMap.set(tx.id, {
+          id: tx.id,
+          type: tx.type,
+          amount: tx.amount,
+          date: tx.date,
+          description: tx.description || tx.category,
+          category: tx.category,
+          bankName: tx.bankName,
+          isManual: true,
+          isDuplicate: false,
+        });
       }
-      // For parsed transactions, compare cleaned bank names (case-insensitive)
-      return tx.bankName && tx.bankName.toLowerCase() === selectedBankCleaned;
     });
-  }
+    
+    // Add remaining parsed transactions
+    businessParsedTransactions.forEach((tx, index) => {
+      if (!usedParsedIndices.has(index)) {
+        const uniqueKey = `parsed_${tx.bankName}_${tx.date}_${tx.amount}_${index}_${tx.rawMessage?.substring(0, 50).replace(/[^a-zA-Z0-9]/g, '') || ''}`;
+        if (!transactionMap.has(uniqueKey)) {
+          transactionMap.set(uniqueKey, {
+            id: uniqueKey,
+            type: tx.type,
+            amount: tx.amount,
+            date: tx.date,
+            description: tx.description,
+            bankName: tx.bankName,
+            remarks: tx.remarks,
+            referenceNumber: tx.referenceNumber,
+            accountNumber: tx.accountNumber,
+            isManual: false,
+            isDuplicate: false,
+          });
+        }
+      }
+    });
+    
+    return Array.from(transactionMap.values());
+  }, [manualTransactions, businessParsedTransactions, isInitialLoad]);
 
-  // Filter by date range - only filter if dates are set
-  const filteredTransactions = bankFilteredTransactions.filter((tx) => {
-    const txDateStr = new Date(tx.date).toISOString().split('T')[0];
-    if (startDate && txDateStr < startDate) return false;
-    if (endDate && txDateStr > endDate) return false;
-    return true;
-  });
+  // Memoize filtered and sorted transactions
+  const filteredTransactions = useMemo(() => {
+    let filtered = allTransactions;
+    
+    // Filter by bank if selected
+    if (selectedBank !== 'all') {
+      const selectedBankCleaned = cleanBankName(selectedBank).toLowerCase();
+      filtered = filtered.filter((tx) => {
+        if (tx.isManual) {
+          if (!tx.bankName) return true;
+          return cleanBankName(tx.bankName).toLowerCase() === selectedBankCleaned;
+        }
+        return tx.bankName && tx.bankName.toLowerCase() === selectedBankCleaned;
+      });
+    }
 
-  // Sort by date (newest first)
-  filteredTransactions.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    // Filter by date range - only filter if dates are set
+    if (startDate || endDate) {
+      filtered = filtered.filter((tx) => {
+        const txDateStr = new Date(tx.date).toISOString().split('T')[0];
+        if (startDate && txDateStr < startDate) return false;
+        if (endDate && txDateStr > endDate) return false;
+        return true;
+      });
+    }
+
+    // Sort by date (newest first)
+    return [...filtered].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [allTransactions, selectedBank, startDate, endDate]);
 
   // Group transactions by month and day
   type GroupedTransactions = {
@@ -322,14 +423,20 @@ export default function BusinessDetailScreen() {
     });
   }, [filteredTransactions]);
 
-  // Calculate totals
-  const totalIncome = filteredTransactions
-    .filter((t) => t.type === 'income')
-    .reduce((sum, t) => sum + t.amount, 0);
-  const totalExpense = filteredTransactions
-    .filter((t) => t.type === 'expense')
-    .reduce((sum, t) => sum + t.amount, 0);
-  const totalBalance = totalIncome - totalExpense;
+  // Memoize totals calculation
+  const { totalIncome, totalExpense, totalBalance } = useMemo(() => {
+    const income = filteredTransactions
+      .filter((t) => t.type === 'income')
+      .reduce((sum, t) => sum + t.amount, 0);
+    const expense = filteredTransactions
+      .filter((t) => t.type === 'expense')
+      .reduce((sum, t) => sum + t.amount, 0);
+    return {
+      totalIncome: income,
+      totalExpense: expense,
+      totalBalance: income - expense,
+    };
+  }, [filteredTransactions]);
 
   const formatDate = (dateString: string) => {
     const date = new Date(dateString);
@@ -448,6 +555,9 @@ export default function BusinessDetailScreen() {
     );
   }
 
+  // Show loading state immediately while data is being loaded
+  const showLoading = isLoadingData || (transactions.length === 0 && senders.length === 0);
+
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
       <ScrollView style={styles.scrollView}>
@@ -460,88 +570,100 @@ export default function BusinessDetailScreen() {
           )}
         </View>
 
-        <Card style={styles.balanceCard}>
-          <Text style={[styles.balanceLabel, { color: colors.textSecondary }]}>Net Balance</Text>
-          <CurrencyDisplay amount={totalBalance} size="large" />
-        </Card>
-
-        <View style={styles.statsRow}>
-          <Card style={styles.statCard}>
-            <Text style={[styles.statLabel, { color: colors.textSecondary }]}>Income</Text>
-            <CurrencyDisplay amount={totalIncome} size="medium" color={colors.income} />
-          </Card>
-          <Card style={styles.statCard}>
-            <Text style={[styles.statLabel, { color: colors.textSecondary }]}>Expense</Text>
-            <CurrencyDisplay amount={totalExpense} size="medium" color={colors.expense} />
-          </Card>
-        </View>
-
-        <View style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <Text style={[styles.sectionTitle, { color: colors.text }]}>Transactions</Text>
-            <View style={styles.headerActions}>
-              {enabledBanks.length > 0 && (
-                <TouchableOpacity 
-                  onPress={() => {
-                    loadAllMessages(enabledBanks);
-                  }} 
-                  style={styles.refreshButton}
-                  disabled={isLoading}
-                >
-                  <Text style={[styles.exportText, { color: colors.primary, opacity: isLoading ? 0.5 : 1 }]}>
-                    🔄 {isLoading ? 'Loading...' : 'Refresh'}
-                  </Text>
-                </TouchableOpacity>
-              )}
-              {filteredTransactions.length > 0 && (
-                <TouchableOpacity onPress={handleExport} style={styles.exportButton}>
-                  <Text style={[styles.exportText, { color: colors.primary }]}>📥 Export</Text>
-                </TouchableOpacity>
-              )}
-            </View>
-          </View>
-
-          {enabledBanks.length > 0 && (
-            <Card style={styles.bankSelectorCard}>
-              <Text style={[styles.selectorLabel, { color: colors.textSecondary, marginBottom: Spacing.sm }]}>
-                Filter by Bank:
-              </Text>
-              <View style={[styles.pickerContainer, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-                <Picker
-                  selectedValue={selectedBank}
-                  onValueChange={handleBankChange}
-                  style={[styles.picker, { color: colors.text }]}
-                  dropdownIconColor={colors.text}
-                >
-                  <Picker.Item label="All Banks" value="all" />
-                  {enabledBanks.map((bank) => (
-                    <Picker.Item key={bank} label={cleanBankName(bank)} value={bank} />
-                  ))}
-                </Picker>
-              </View>
-            </Card>
-          )}
-
-          <Card style={styles.dateFilterCard}>
-            <Text style={[styles.selectorLabel, { color: colors.textSecondary, marginBottom: Spacing.sm }]}>
-              Date Range:
+        {showLoading ? (
+          <Card style={styles.loadingCard}>
+            <ActivityIndicator size="large" color={colors.primary} />
+            <Text style={[styles.loadingText, { color: colors.textSecondary }]}>
+              Loading data...
             </Text>
-            <DateRangePicker
-              startDate={startDate}
-              endDate={endDate}
-              onStartDateChange={setStartDate}
-              onEndDateChange={setEndDate}
-            />
           </Card>
-
-          {isLoading ? (
-            <Card style={styles.loadingCard}>
-              <ActivityIndicator size="large" color={colors.primary} />
-              <Text style={[styles.loadingText, { color: colors.textSecondary }]}>
-                Loading transactions...
-              </Text>
+        ) : (
+          <>
+            <Card style={styles.balanceCard}>
+              <Text style={[styles.balanceLabel, { color: colors.textSecondary }]}>Net Balance</Text>
+              <CurrencyDisplay amount={totalBalance} size="large" />
             </Card>
-          ) : filteredTransactions.length > 0 ? (
+
+            <View style={styles.statsRow}>
+              <Card style={styles.statCard}>
+                <Text style={[styles.statLabel, { color: colors.textSecondary }]}>Income</Text>
+                <CurrencyDisplay amount={totalIncome} size="medium" color={colors.income} />
+              </Card>
+              <Card style={styles.statCard}>
+                <Text style={[styles.statLabel, { color: colors.textSecondary }]}>Expense</Text>
+                <CurrencyDisplay amount={totalExpense} size="medium" color={colors.expense} />
+              </Card>
+            </View>
+          </>
+        )}
+
+        {!showLoading && (
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={[styles.sectionTitle, { color: colors.text }]}>Transactions</Text>
+              <View style={styles.headerActions}>
+                {enabledBanks.length > 0 && (
+                  <TouchableOpacity 
+                    onPress={() => {
+                      loadAllMessages(enabledBanks);
+                    }} 
+                    style={styles.refreshButton}
+                    disabled={isLoading}
+                  >
+                    <Text style={[styles.exportText, { color: colors.primary, opacity: isLoading ? 0.5 : 1 }]}>
+                      🔄 {isLoading ? 'Loading...' : 'Refresh'}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                {filteredTransactions.length > 0 && (
+                  <TouchableOpacity onPress={handleExport} style={styles.exportButton}>
+                    <Text style={[styles.exportText, { color: colors.primary }]}>📥 Export</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
+
+            {enabledBanks.length > 0 && (
+              <Card style={styles.bankSelectorCard}>
+                <Text style={[styles.selectorLabel, { color: colors.textSecondary, marginBottom: Spacing.sm }]}>
+                  Filter by Bank:
+                </Text>
+                <View style={[styles.pickerContainer, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+                  <Picker
+                    selectedValue={selectedBank}
+                    onValueChange={handleBankChange}
+                    style={[styles.picker, { color: colors.text }]}
+                    dropdownIconColor={colors.text}
+                  >
+                    <Picker.Item label="All Banks" value="all" />
+                    {enabledBanks.map((bank) => (
+                      <Picker.Item key={bank} label={cleanBankName(bank)} value={bank} />
+                    ))}
+                  </Picker>
+                </View>
+              </Card>
+            )}
+
+            <Card style={styles.dateFilterCard}>
+              <Text style={[styles.selectorLabel, { color: colors.textSecondary, marginBottom: Spacing.sm }]}>
+                Date Range:
+              </Text>
+              <DateRangePicker
+                startDate={startDate}
+                endDate={endDate}
+                onStartDateChange={setStartDate}
+                onEndDateChange={setEndDate}
+              />
+            </Card>
+
+            {(isLoading || isInitialLoad) ? (
+              <Card style={styles.loadingCard}>
+                <ActivityIndicator size="large" color={colors.primary} />
+                <Text style={[styles.loadingText, { color: colors.textSecondary }]}>
+                  {isLoading ? 'Loading transactions...' : 'Processing...'}
+                </Text>
+              </Card>
+            ) : filteredTransactions.length > 0 ? (
             <View style={styles.transactionsContainer}>
               <Text style={[styles.transactionsCount, { color: colors.textSecondary }]}>
                 {filteredTransactions.length} transaction{filteredTransactions.length !== 1 ? 's' : ''} found
@@ -614,7 +736,8 @@ export default function BusinessDetailScreen() {
               </Text>
             </Card>
           )}
-        </View>
+          </View>
+        )}
       </ScrollView>
 
       <View style={styles.fabContainer}>

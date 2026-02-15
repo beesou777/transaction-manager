@@ -222,17 +222,17 @@ export default function HomeScreen() {
           <View style={styles.summaryDisplay}>
             <View style={styles.summaryItem}>
               <Text style={[styles.summaryText, { color: colors.textSecondary }]}>Income</Text>
-              <CurrencyDisplay amount={totalIncome} size="large" color={colors.success} />
+              <CurrencyDisplay amount={totalIncome} size="medium" color={colors.success} />
             </View>
             <Text style={[styles.summarySeparator, { color: colors.textSecondary }]}>|</Text>
             <View style={styles.summaryItem}>
               <Text style={[styles.summaryText, { color: colors.textSecondary }]}>Expense</Text>
-              <CurrencyDisplay amount={totalExpense} size="large" color={colors.error} />
+              <CurrencyDisplay amount={totalExpense} size="medium" color={colors.error} />
             </View>
           </View>
           <View style={styles.profitContainer}>
             <Text style={[styles.profitLabel, { color: colors.textSecondary }]}>Net</Text>
-            <CurrencyDisplay amount={totalBalance} size="large" color={totalBalance >= 0 ? colors.success : colors.error} />
+            <CurrencyDisplay amount={totalBalance} size="medium" color={totalBalance >= 0 ? colors.success : colors.error} />
           </View>
         </Card>
 
@@ -249,6 +249,8 @@ export default function HomeScreen() {
               return (
                 <TouchableOpacity
                   key={business.id}
+                  activeOpacity={0.8}
+                  style={styles.businessCard}
                   onPress={() => {
                     // @ts-ignore - navigation type issue
                     navigation.navigate('BusinessDetail', { id: business.id });

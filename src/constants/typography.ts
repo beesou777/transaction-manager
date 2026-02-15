@@ -22,7 +22,7 @@ export const Typography = {
     lineHeight: 24,
   },
   body: {
-    fontSize: 16,
+    fontSize: 20,
     fontWeight: '400' as TextStyle['fontWeight'],
     lineHeight: 24,
   },

@@ -2,6 +2,8 @@ import { create } from 'zustand';
 import { storageService } from '@/storage/asyncStorage';
 import { Platform, PermissionsAndroid } from 'react-native';
 import { parseSMSMessage, ParsedTransaction } from '@/utils/smsParser';
+import { DEMO_MODE } from '@/constants/demoMode';
+import { getDemoSMSMessages, getDemoAvailableSenders } from '@/utils/demoData';
 
 // Dynamically import SMS reading package
 let ReadSms: any = null;
@@ -82,6 +84,13 @@ export const useSMSStore = create<SMSState>((set, get) => ({
   },
 
   loadAvailableSenders: async () => {
+    // Demo mode - return fake senders
+    if (DEMO_MODE) {
+      const demoSenders = getDemoAvailableSenders();
+      set({ availableSenders: demoSenders, error: null });
+      return;
+    }
+
     if (Platform.OS !== 'android') {
       // iOS/other platforms - show empty list, user can add manually
       set({ availableSenders: [], error: 'SMS reading is only available on Android' });
@@ -270,6 +279,30 @@ export const useSMSStore = create<SMSState>((set, get) => ({
   },
 
   loadMessages: async (senderName: string, count: number = 100) => {
+    // Demo mode - return fake messages
+    if (DEMO_MODE) {
+      set({ isLoading: true, error: null });
+      try {
+        const demoMessages = getDemoSMSMessages(senderName);
+        
+        // Parse messages into transactions
+        const parsed: ParsedTransaction[] = [];
+        demoMessages.forEach((msg) => {
+          const parsedTx = parseSMSMessage(msg.body, senderName);
+          if (parsedTx) {
+            parsed.push(parsedTx);
+          }
+        });
+        parsed.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+        set({ messages: demoMessages, parsedTransactions: parsed, isLoading: false, error: null });
+      } catch (error) {
+        console.error('Error loading demo SMS messages:', error);
+        set({ messages: [], error: (error as Error).message, isLoading: false });
+      }
+      return;
+    }
+
     if (Platform.OS !== 'android') {
       set({ messages: [], error: 'SMS reading only available on Android' });
       return;
@@ -363,6 +396,33 @@ export const useSMSStore = create<SMSState>((set, get) => ({
   },
 
   loadAllMessages: async (senderNames: string[], count: number = 5000) => {
+    // Demo mode - return fake messages from all senders
+    if (DEMO_MODE) {
+      set({ isLoading: true, error: null });
+      try {
+        const allParsed: ParsedTransaction[] = [];
+        
+        for (const senderName of senderNames) {
+          const demoMessages = getDemoSMSMessages(senderName);
+          demoMessages.forEach((msg) => {
+            const parsedTx = parseSMSMessage(msg.body, senderName);
+            if (parsedTx) {
+              allParsed.push(parsedTx);
+            }
+          });
+        }
+        
+        // Sort by date (newest first)
+        allParsed.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+        
+        set({ allParsedTransactions: allParsed, isLoading: false, error: null });
+      } catch (error) {
+        console.error('Error loading demo all messages:', error);
+        set({ allParsedTransactions: [], error: (error as Error).message, isLoading: false });
+      }
+      return;
+    }
+
     if (Platform.OS !== 'android') {
       set({ allParsedTransactions: [], error: 'SMS reading only available on Android' });
       return;
